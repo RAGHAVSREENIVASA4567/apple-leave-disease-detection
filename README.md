@@ -1,82 +1,174 @@
-# Apple leaf disease detection: all project code
+# AppleCare AI
 
-Classifies apple leaf photos into four classes (Apple rot, Healthy, Leaf blotch, Apple scab) with
-transfer learning, and serves the model in a small web app that shows the disease name, confidence,
-likely cause and suggested remedy.
+AppleCare AI uses the supplied trained MobileNetV2 model as its primary and
+only scan classifier. The React app sends images to the existing Node API,
+which forwards them to the local Flask model service and saves the returned
+class scores in scan history. Gemini and OpenAI are not used; if the local
+model service is unavailable, a scan fails instead of falling back to another
+provider or generating a result.
 
-## Where things are
+## Requirements
 
-| Folder | What it is |
-|---|---|
-| `v1_baseline/` | First pipeline: `preprocess.py` -> `train_model.py` (MobileNetV2 fine-tuning) -> `evaluate_model.py` |
-| `v2_pipeline/` | Second pipeline (duplicate-aware, aspect-ratio-preserving, frozen features from 3 CNNs). Steps `01` to `04`; `05_finetune.py` is an experiment that did not help |
-| `app/` | Web app (Flask). Uses the v1 model in `app/model/`. See `app/README.md` to run it |
+- Node.js 20.19+ or 22.12+
+- npm
+- Python and the packages in `model-service/requirements.txt`
+- Optional: MongoDB for persistent scan history
 
-## Results (held-out test set, 63 photos)
+Use Python 3.11 for the model environment; the configured workspace interpreter
+may be newer than the TensorFlow wheel support range.
 
-| Model | Test accuracy | 95% interval |
-|---|---|---|
-| v1: MobileNetV2, fine-tuned (used by the app) | 55.6% (35/63) | about 43-67% |
-| v2: Xception + InceptionV3 + MobileNetV2 features, linear head | 58.7% | 46-71% |
-| v2, duplicate-free subset (57 photos) | 54.4% | 40-67% |
+## Install
 
-**The 80% target was not reached.** The v2 model is not meaningfully better than v1: the difference is far
-smaller than the uncertainty from having only 63 test photos. In grouped 5-fold cross-validation on
-train+val, v2 scored 66.0% +/- 4.1.
-
-## What was tried (v2)
-
-- Keep the leaves' natural tall shape (512x256) instead of squashing them into squares (v1 did).
-- Frozen ImageNet features from MobileNetV2-1.4, Xception and InceptionV3 (average + max pooled), with a
-  logistic-regression head. Cross-validation: single backbones 62.5-64.5%, all three 66.0%.
-- Small MLP head on the same features: 62.5-65.3% (no better).
-- Fine-tuning MobileNetV2 with strong augmentation (`05_finetune.py`): 53.6% on one fold, worse than frozen features.
-- Model selection used only train+val photos; the test set was evaluated once, after the choice was made.
-
-## Problems in the dataset (they limit what any model can reach)
-
-- **Contradictory labels:** 10 photos sit in near-duplicate groups with different labels (for example the
-  same photo in both the Apple rot and Healthy folders). `01_prepare_data.py` finds them; v2 drops them from training.
-- **Leakage:** 6 of the 63 test photos have a near-duplicate in train/val. `04_evaluate.py` therefore also reports
-  a duplicate-free subset.
-- **Background shortcut:** colour statistics from the image borders alone predict the class 46% of the time
-  (always guessing the largest class gives 38%). A CNN may use background texture, so scores here may not carry over to real orchards.
-- **Size:** about 350 usable photos for 4 classes.
-- **"Apple rot" is not defined by the dataset.** The app's cause text assumes black rot / frogeye leaf spot; confirm it.
-
-What would most likely help: more photos (especially healthy leaves and varied backgrounds), labels checked by a
-plant pathologist, duplicates removed before splitting, and a consistent way of photographing leaves.
-
-## Running v2 (about 30 minutes on one CPU core)
+Install the JavaScript dependencies:
 
 ```bash
-pip install -r requirements.txt
-cd v2_pipeline
-# unzip the dataset so that data/raw/APPLE_DISEASE_DATASET/<class folders> exists
-python 01_prepare_data.py
-python 02_extract_features.py --backbone mnv2_1.4     # ~5 min
-python 02_extract_features.py --backbone xception     # ~12 min
-python 02_extract_features.py --backbone inceptionv3  # ~9 min
-python 03_train_classifier.py                         # cross-validation, then exports models/apple_leaf_classifier.keras (~190 MB)
-python 04_evaluate.py                                 # test metrics and plots into reports/
+npm install
+npm --prefix backend install
+npm --prefix frontend install
 ```
 
-The pretrained ImageNet weights download automatically. I tested only with local copies of the weight files
-(my environment could not reach the Keras download server), so numbers on your machine may differ slightly.
-If you place weight files in `v2_pipeline/weights/` the scripts use them first.
-
-## Running v1
-
-Run from a folder containing `raw_dataset/APPLE_DISEASE_DATASET/`:
+Create a Python virtual environment and install the model-service requirements:
 
 ```bash
-python v1_baseline/preprocess.py
-python v1_baseline/train_model.py
-python v1_baseline/evaluate_model.py     # expects apple_disease_mobilenetv2.keras in the current folder
+python3.11 -m venv model-service/.venv
+model-service/.venv/bin/python -m pip install -r model-service/requirements.txt
 ```
 
-## The web app
+On Windows, run `py -3.11 -m venv model-service\.venv`, then use
+`model-service\.venv\Scripts\python.exe` in place of
+`model-service/.venv/bin/python`.
 
-`app/` serves the v1 model (small and fast). The v2 model is a ~190 MB ensemble that needs about a second per photo
-on one CPU core and is not meaningfully more accurate, so it is not wired into the app.
-The app is a prototype screening aid, not a diagnosis tool.
+## Configure
+
+Copy `.env.example` to `backend/.env`:
+
+```dotenv
+PORT=4000
+CLIENT_ORIGIN=http://localhost:5173,http://127.0.0.1:5173
+MODEL_SERVICE_URL=http://127.0.0.1:5000
+MODEL_SERVICE_TIMEOUT_MS=30000
+MONGODB_URI=
+MAX_UPLOAD_MB=8
+```
+
+The browser only calls the Node API; model files and configuration remain on
+the server. `MODEL_SERVICE_URL` should point to the Flask service. To use a
+specific Python interpreter for automatic startup, set `MODEL_PYTHON` in the
+shell before running `npm run dev`. By default, the dev script uses `python3`
+on macOS/Linux and `python` on Windows. Set `MODEL_SERVICE_AUTOSTART=false` to
+start the model service separately.
+
+## Run locally
+
+With the Python environment installed, start all three services:
+
+```bash
+MODEL_PYTHON=model-service/.venv/bin/python npm run dev
+```
+
+On Windows PowerShell, set the interpreter before startup:
+
+```powershell
+$env:MODEL_PYTHON = "model-service\.venv\Scripts\python.exe"
+npm run dev
+```
+
+- Web app: http://localhost:5173
+- Node API: http://localhost:4000
+- Model service: http://127.0.0.1:5000
+- Health check: http://localhost:4000/api/health
+
+To run services separately:
+
+```bash
+model-service/.venv/bin/python model-service/app.py
+npm --prefix backend run dev
+npm --prefix frontend run dev
+```
+
+Without `MONGODB_URI`, history uses an in-memory store (up to 20 scans) and is
+cleared when the backend restarts. With a URI, MongoDB persistence continues to
+use the existing scan-history behavior. MongoDB connection failures stop the
+API from starting rather than silently switching stores.
+
+## Model output and limitations
+
+The classifier returns scores for exactly four training labels:
+
+- `APPLE ROT LEAVES`
+- `HEALTHY LEAVES`
+- `LEAF BLOTCH`
+- `SCAB LEAVES`
+
+The app preserves those labels rather than claiming that a model class is a
+confirmed botanical diagnosis. The top class is marked uncertain below a
+0.60 score. Scores come from the model's softmax output; they have not been
+calibrated and are not diagnostic probabilities. The model was trained on leaf
+images but does not check whether an uploaded image is an apple leaf or assess
+image quality. It does not generate symptoms, causes, or treatment advice.
+
+The supplied held-out evaluation reports **55.6% accuracy on 63 test images**;
+recall for `SCAB LEAVES` was **33%**. The score can be wrong, including when it
+is high. Use this prototype for screening only, and consult a local
+agricultural extension service or plant pathologist before choosing treatment.
+
+## History and dashboard
+
+- Dashboard metrics and history continue to use the existing API and storage.
+- The dashboard's class chart counts each scan's highest-ranked class,
+  including low-score/uncertain results.
+- Scan history remains searchable and deletable, and exports a CSV report.
+- The disease library remains educational reference material; it is separate
+  from and does not expand the model's four supported output labels.
+
+## API
+
+- `POST /api/analyze-leaf` — multipart form with an `image` field (JPEG, PNG,
+  or WebP). Returns the saved scan, including `analysis.predicted_class`,
+  `analysis.class_scores`, and `analysis.confidence_score`.
+- `GET /api/history` — recent analyses, including image previews; at most 200
+  MongoDB records are returned.
+- `GET /api/history/:id` — retrieve one analysis.
+- `DELETE /api/history/:id` — delete one analysis.
+- `GET /api/health` — API and local-model readiness status.
+- Model service `POST /predict` — internal multipart inference endpoint.
+
+Uploads are limited to one image and 8 MB by default. The API checks the
+declared MIME type and image signature, and stores the original photo and a
+small preview for history. Requests are rate-limited and response security
+headers are enabled.
+
+## Test and build
+
+```bash
+npm --prefix backend test
+npm --prefix frontend test
+npm run build
+```
+
+The backend tests cover model-service requests, class-score validation, and
+history image handling. Frontend utility tests cover date-range filtering and
+CSV escaping. A real scan requires TensorFlow and the supplied model to be
+installed and loaded by the local service.
+
+## Image credits
+
+- “Fresh ripe apples on a tree” by AS Photography, [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Fresh_ripe_apples_on_a_tree_(54015357813).jpg), [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) (resized to WebP for the application).
+- “Apple Tree Leaf” by Konstantin Tsabolov, [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Apple_Tree_Leaf_(35128940).jpeg), [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/) (resized to WebP for the application).
+
+## Operational limitations
+
+Camera capture requires browser permission and a secure context (HTTPS, except
+`localhost`). Persistent history requires a configured MongoDB instance. The
+unauthenticated demo is intended for local evaluation, not multi-user
+production. Before deployment, add user authentication, per-user history
+access controls, retention/privacy policies, production model serving, and
+monitoring.
+
+## Earlier model research
+
+The original standalone Flask app and model experiments are preserved in
+[`app/`](./app/), [`v1_baseline/`](./v1_baseline/), and
+[`v2_pipeline/`](./v2_pipeline/). The repository's earlier project overview,
+including the v2 experiment results and dataset findings, is preserved in
+[`docs/model-research.md`](./docs/model-research.md).

@@ -1,0 +1,11 @@
+node_modules/
+frontend/dist/
+backend/.env
+.env
+.DS_Store
+coverage/
+npm-debug.log*
+.venv/
+model-service/.venv/
+__pycache__/
+*.py[cod]
